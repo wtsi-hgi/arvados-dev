@@ -458,7 +458,7 @@ then
 fi
 
 # Ensure we have the newest selenium-webdriver
-gem update selenium-webdriver
+gem install selenium-webdriver
 
 # If DISPLAY is unset, there is no way selenium/firefox could work
 if [ -n "${DISPLAY}" ]
