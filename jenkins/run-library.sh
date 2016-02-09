@@ -2,6 +2,11 @@
 
 # A library of functions shared by the various scripts in this directory.
 
+# This is the timestamp about when we merged changed to include licenses
+# with Arvados packages.  We use it as a heuristic to add revisions for
+# older packages.
+LICENSE_PACKAGE_TS=20151208015500
+
 debug_echo () {
     echo "$@" >"$STDOUT_IF_DEBUG"
 }
@@ -23,7 +28,7 @@ EOF
 }
 
 format_last_commit_here() {
-    local format=$1; shift
+    local format="$1"; shift
     TZ=UTC git log -n1 --first-parent "--format=format:$format" .
 }
 
@@ -54,8 +59,8 @@ handle_python_package () {
 }
 
 handle_ruby_gem() {
-    local gem_name=$1; shift
-    local gem_version=$(nohash_version_from_git)
+    local gem_name="$1"; shift
+    local gem_version="$(nohash_version_from_git)"
     local gem_src_dir="$(pwd)"
 
     if ! [[ -e "${gem_name}-${gem_version}.gem" ]]; then
@@ -64,6 +69,107 @@ handle_ruby_gem() {
         # -q appears to be broken in gem version 2.2.2
         $GEM build "$gem_name.gemspec" $DASHQ_UNLESS_DEBUG >"$STDOUT_IF_DEBUG" 2>"$STDERR_IF_DEBUG"
     fi
+}
+
+# Usage: package_go_binary services/foo arvados-foo "Compute foo to arbitrary precision"
+package_go_binary() {
+    local src_path="$1"; shift
+    local prog="$1"; shift
+    local description="$1"; shift
+    local license_file="${1:-agpl-3.0.txt}"; shift
+
+    debug_echo "package_go_binary $src_path as $prog"
+
+    local basename="${src_path##*/}"
+
+    mkdir -p "$GOPATH/src/git.curoverse.com"
+    ln -sfn "$WORKSPACE" "$GOPATH/src/git.curoverse.com/arvados.git"
+
+    cd "$GOPATH/src/git.curoverse.com/arvados.git/$src_path"
+    local version="$(version_from_git)"
+    local timestamp="$(timestamp_from_git)"
+
+    # If the command imports anything from the Arvados SDK, bump the
+    # version number and build a new package whenever the SDK changes.
+    if grep -qr git.curoverse.com/arvados .; then
+        cd "$GOPATH/src/git.curoverse.com/arvados.git/sdk/go"
+        if [[ $(timestamp_from_git) -gt "$timestamp" ]]; then
+            version=$(version_from_git)
+        fi
+    fi
+
+    cd $WORKSPACE/packages/$TARGET
+    go get "git.curoverse.com/arvados.git/$src_path"
+    fpm_build "$GOPATH/bin/$basename=/usr/bin/$prog" "$prog" 'Curoverse, Inc.' dir "$version" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=$description" "$WORKSPACE/$license_file=/usr/share/doc/$prog/$license_file"
+}
+
+default_iteration() {
+    local package_name="$1"; shift
+    local package_version="$1"; shift
+    local iteration=1
+    if [[ $package_version =~ ^0\.1\.([0-9]{14})(\.|$) ]] && \
+           [[ ${BASH_REMATCH[1]} -le $LICENSE_PACKAGE_TS ]]; then
+        iteration=2
+    fi
+    echo $iteration
+}
+
+_build_rails_package_scripts() {
+    local pkgname="$1"; shift
+    local destdir="$1"; shift
+    local srcdir="$RUN_BUILD_PACKAGES_PATH/rails-package-scripts"
+    for scriptname in postinst prerm postrm; do
+        cat "$srcdir/$pkgname.sh" "$srcdir/step2.sh" "$srcdir/$scriptname.sh" \
+            >"$destdir/$scriptname" || return $?
+    done
+}
+
+handle_rails_package() {
+    local pkgname="$1"; shift
+    local srcdir="$1"; shift
+    local license_path="$1"; shift
+    local scripts_dir="$(mktemp --tmpdir -d "$pkgname-XXXXXXXX.scripts")" && \
+    local version_file="$(mktemp --tmpdir "$pkgname-XXXXXXXX.version")" && (
+        set -e
+        _build_rails_package_scripts "$pkgname" "$scripts_dir"
+        cd "$srcdir"
+        mkdir -p tmp
+        version_from_git >"$version_file"
+        git rev-parse HEAD >git-commit.version
+        bundle package --all
+    )
+    if [[ 0 != "$?" ]] || ! cd "$WORKSPACE/packages/$TARGET"; then
+        echo "ERROR: $pkgname package prep failed" >&2
+        rm -rf "$scripts_dir" "$version_file"
+        EXITCODE=1
+        return 1
+    fi
+    local railsdir="/var/www/${pkgname%-server}/current"
+    local -a pos_args=("$srcdir/=$railsdir" "$pkgname" "Curoverse, Inc." dir
+                       "$(cat "$version_file")")
+    local license_arg="$license_path=$railsdir/$(basename "$license_path")"
+    # --iteration=3 accommodates the package scripts change from #8014.
+    # --iteration=4 accommodates the packaging changes (inclusion of vendor/cache) from #8008.
+    local -a switches=(--iteration=4
+                       --after-install "$scripts_dir/postinst"
+                       --before-remove "$scripts_dir/prerm"
+                       --after-remove "$scripts_dir/postrm")
+    # For some reason fpm excludes need to not start with /.
+    local exclude_root="${railsdir#/}"
+    # .git and packages are for the SSO server, which is built from its
+    # repository root.
+    local -a exclude_list=(.git packages tmp log coverage Capfile\* \
+                           config/deploy\* config/application.yml)
+    # for arvados-workbench, we need to have the (dummy) config/database.yml in the package
+    if  [[ "$pkgname" != "arvados-workbench" ]]; then
+      exclude_list+=('config/database.yml')
+    fi
+    for exclude in ${exclude_list[@]}; do
+        switches+=(-x "$exclude_root/$exclude")
+    done
+    fpm_build "${pos_args[@]}" "${switches[@]}" \
+              -x "$exclude_root/vendor/bundle" "$@" "$license_arg"
+    rm -rf "$scripts_dir" "$version_file"
 }
 
 # Build packages for everything
@@ -112,6 +218,12 @@ fpm_build () {
   declare -a COMMAND_ARR=("fpm" "--maintainer=Ward Vandewege <ward@curoverse.com>" "-s" "$PACKAGE_TYPE" "-t" "$FORMAT")
   if [ python = "$PACKAGE_TYPE" ]; then
     COMMAND_ARR+=(--exclude=\*/{dist,site}-packages/tests/\*)
+    if [ deb = "$FORMAT" ]; then
+        # Dependencies are built from setup.py.  Since setup.py will never
+        # refer to Debian package iterations, it doesn't make sense to
+        # enforce those in the .deb dependencies.
+        COMMAND_ARR+=(--deb-ignore-iteration-in-dependencies)
+    fi
   fi
 
   if [[ "$PACKAGE_NAME" != "$PACKAGE" ]]; then
@@ -125,19 +237,22 @@ fpm_build () {
   if [[ "$VERSION" != "" ]]; then
     COMMAND_ARR+=('-v' "$VERSION")
   fi
+  # We can always add an --iteration here.  If another one is specified in $@,
+  # that will take precedence, as desired.
+  COMMAND_ARR+=(--iteration "$(default_iteration "$PACKAGE" "$VERSION")")
 
-  # Append remaining function arguments directly to fpm's command line.
-  for i; do
-    COMMAND_ARR+=("$i")
-  done
+  # 'dir' type packages are provided in the form /path/to/source=/path/to/dest
+  # so strip off the 2nd part to check for fpm-info below.
+  PACKAGE_DIR=$(echo $PACKAGE | sed 's/\/=.*//')
 
   # Append --depends X and other arguments specified by fpm-info.sh in
   # the package source dir. These are added last so they can override
   # the arguments added by this script.
   declare -a fpm_args=()
   declare -a fpm_depends=()
-  if [[ -d "$PACKAGE" ]]; then
-      FPM_INFO="$PACKAGE/fpm-info.sh"
+  declare -a fpm_exclude=()
+  if [[ -d "$PACKAGE_DIR" ]]; then
+      FPM_INFO="$PACKAGE_DIR/fpm-info.sh"
   else
       FPM_INFO="${WORKSPACE}/backports/${PACKAGE_TYPE}-${PACKAGE}/fpm-info.sh"
   fi
@@ -148,6 +263,15 @@ fpm_build () {
   for i in "${fpm_depends[@]}"; do
     COMMAND_ARR+=('--depends' "$i")
   done
+  for i in "${fpm_exclude[@]}"; do
+    COMMAND_ARR+=('--exclude' "$i")
+  done
+
+  # Append remaining function arguments directly to fpm's command line.
+  for i; do
+    COMMAND_ARR+=("$i")
+  done
+
   COMMAND_ARR+=("${fpm_args[@]}")
 
   COMMAND_ARR+=("$PACKAGE")
@@ -181,5 +305,14 @@ fpm_verify () {
     echo "Package $FPM_PACKAGE_NAME exists, not rebuilding"
   elif [[ 0 -ne "$FPM_EXIT_CODE" ]]; then
     echo "Error building package for $1:\n $FPM_RESULTS"
+  fi
+}
+
+install_package() {
+  PACKAGES=$@
+  if [[ "$FORMAT" == "deb" ]]; then
+    $SUDO apt-get install $PACKAGES --yes
+  elif [[ "$FORMAT" == "rpm" ]]; then
+    $SUDO yum -q -y install $PACKAGES
   fi
 }
