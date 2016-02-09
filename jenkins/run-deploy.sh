@@ -1,6 +1,7 @@
 #!/bin/bash
 
 DEBUG=0
+SSH_PORT=22
 
 function usage {
     echo >&2
@@ -9,6 +10,7 @@ function usage {
     echo >&2 "   <identifier>                 Arvados cluster name"
     echo >&2
     echo >&2 "$0 options:"
+    echo >&2 "  -p, --port <ssh port>         SSH port to use (default 22)"
     echo >&2 "  -d, --debug                   Enable debug output"
     echo >&2 "  -h, --help                    Display this help and exit"
     echo >&2
@@ -27,8 +29,8 @@ function usage {
 }
 
 # NOTE: This requires GNU getopt (part of the util-linux package on Debian-based distros).
-TEMP=`getopt -o hd \
-    --long help,debug \
+TEMP=`getopt -o hdp: \
+    --long help,debug,port: \
     -n "$0" -- "$@"`
 
 if [ $? != 0 ] ; then echo "Use -h for help"; exit 1 ; fi
@@ -38,6 +40,9 @@ eval set -- "$TEMP"
 while [ $# -ge 1 ]
 do
     case $1 in
+        -p | --port)
+            SSH_PORT="$2"; shift 2
+            ;;
         -d | --debug)
             DEBUG=1
             shift
@@ -64,6 +69,21 @@ EXITCODE=0
 
 COLUMNS=80
 
+PUPPET_AGENT='
+now() { date +%s; }
+let endtime="$(now) + 600"
+while [ "$endtime" -gt "$(now)" ]; do
+    puppet agent --test --detailed-exitcodes
+    agent_exitcode=$?
+    if [ 0 = "$agent_exitcode" ] || [ 2 = "$agent_exitcode" ]; then
+        break
+    else
+        sleep 10s
+    fi
+done
+exit ${agent_exitcode:-99}
+'
+
 title () {
   date=`date +'%Y-%m-%d %H:%M:%S'`
   printf "$date $1\n"
@@ -76,12 +96,12 @@ function run_puppet() {
   title "Running puppet on $node"
   TMP_FILE=`mktemp`
   if [[ "$DEBUG" != "0" ]]; then
-    ssh -t -p2222 -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C "/usr/bin/puppet agent -t" | tee $TMP_FILE
+    ssh -t -p$SSH_PORT -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C bash -c "'$PUPPET_AGENT'" | tee $TMP_FILE
   else
-    ssh -t -p2222 -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C "/usr/bin/puppet agent -t" > $TMP_FILE 2>&1
+    ssh -t -p$SSH_PORT -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C bash -c "'$PUPPET_AGENT'" > $TMP_FILE 2>&1
   fi
 
-  ECODE=$?
+  ECODE=${PIPESTATUS[0]}
   RESULT=$(cat $TMP_FILE)
 
   if [[ "$ECODE" != "255" && ! ("$RESULT" =~ 'already in progress') && "$ECODE" != "2" && "$ECODE" != "0"  ]]; then
@@ -114,9 +134,9 @@ function run_command() {
   title "Running '$command' on $node"
   TMP_FILE=`mktemp`
   if [[ "$DEBUG" != "0" ]]; then
-    ssh -t -p2222 -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C "$command" | tee $TMP_FILE
+    ssh -t -p$SSH_PORT -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C "$command" | tee $TMP_FILE
   else
-    ssh -t -p2222 -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C "$command" > $TMP_FILE 2>&1
+    ssh -t -p$SSH_PORT -o "StrictHostKeyChecking no" -o "ConnectTimeout 5" root@$node -C "$command" > $TMP_FILE 2>&1
   fi
 
   ECODE=$?
@@ -143,10 +163,11 @@ title "Updating API server"
 SUM_ECODE=0
 run_puppet $IDENTIFIER.arvadosapi.com ECODE
 SUM_ECODE=$(($SUM_ECODE + $ECODE))
-run_command $IDENTIFIER.arvadosapi.com ECODE "/usr/local/bin/arvados-api-server-upgrade.sh"
-SUM_ECODE=$(($SUM_ECODE + $ECODE))
-run_command $IDENTIFIER.arvadosapi.com ECODE "dpkg -L arvados-mailchimp-plugin 2>/dev/null && apt-get install arvados-mailchimp-plugin --reinstall || echo"
-SUM_ECODE=$(($SUM_ECODE + $ECODE))
+if [ ! "$IDENTIFIER" = "c97qk" ]
+then
+  run_command $IDENTIFIER.arvadosapi.com ECODE "dpkg -L arvados-mailchimp-plugin 2>/dev/null && apt-get install arvados-mailchimp-plugin --reinstall || echo"
+  SUM_ECODE=$(($SUM_ECODE + $ECODE))
+fi
 
 if [[ "$SUM_ECODE" != "0" ]]; then
   title "ERROR: Updating API server FAILED"
@@ -210,14 +231,11 @@ KEEP_NODES=`ARVADOS_API_HOST=$ARVADOS_API_HOST ARVADOS_API_TOKEN=$ARVADOS_API_TO
 
 title "Updating workbench"
 SUM_ECODE=0
-if [[ `host workbench.$ARVADOS_API_HOST` != `host $ARVADOS_API_HOST` ]]; then
+if [[ `host workbench.$ARVADOS_API_HOST |cut -f4 -d' '` != `host $ARVADOS_API_HOST |cut -f4 -d' '` ]]; then
   # Workbench runs on a separate host. We need to run puppet there too.
   run_puppet workbench.$IDENTIFIER ECODE
   SUM_ECODE=$(($SUM_ECODE + $ECODE))
 fi
-
-run_command workbench.$IDENTIFIER ECODE "/usr/local/bin/arvados-workbench-upgrade.sh"
-SUM_ECODE=$(($SUM_ECODE + $ECODE))
 
 if [[ "$SUM_ECODE" != "0" ]]; then
   title "ERROR: Updating workbench FAILED"

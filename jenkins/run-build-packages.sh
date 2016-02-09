@@ -27,7 +27,6 @@ EOF
 
 EXITCODE=0
 DEBUG=${ARVADOS_DEBUG:-0}
-BUILD_BUNDLE_PACKAGES=0
 TARGET=debian7
 COMMAND=
 
@@ -51,9 +50,6 @@ while [ $# -gt 0 ]; do
             ;;
         --debug)
             DEBUG=1
-            ;;
-        --build-bundle-packages)
-            BUILD_BUNDLE_PACKAGES=1
             ;;
         --command)
             COMMAND="$2"; shift
@@ -95,9 +91,9 @@ case "$TARGET" in
         PYTHON3_PKG_PREFIX=python3
         PYTHON_BACKPORTS=(python-gflags pyvcf google-api-python-client \
             oauth2client pyasn1==0.1.7 pyasn1-modules==0.0.5 \
-            rsa uritemplate httplib2 ws4py \
-            virtualenv pykka requests six pyexecjs jsonschema \
-            ciso8601 pycrypto backports.ssl_match_hostname pycurl llfuse)
+            rsa uritemplate httplib2 ws4py pykka six pyexecjs jsonschema \
+            ciso8601 pycrypto backports.ssl_match_hostname llfuse==0.41.1 \
+            'pycurl<7.21.5')
         PYTHON3_BACKPORTS=(docker-py six requests websocket-client)
         ;;
     debian8)
@@ -108,9 +104,9 @@ case "$TARGET" in
         PYTHON3_PKG_PREFIX=python3
         PYTHON_BACKPORTS=(python-gflags pyvcf google-api-python-client \
             oauth2client pyasn1==0.1.7 pyasn1-modules==0.0.5 \
-            rsa uritemplate httplib2 ws4py \
-            virtualenv pykka requests six pyexecjs jsonschema \
-            ciso8601 pycrypto backports.ssl_match_hostname pycurl llfuse)
+            rsa uritemplate httplib2 ws4py pykka six pyexecjs jsonschema \
+            ciso8601 pycrypto backports.ssl_match_hostname llfuse==0.41.1 \
+            'pycurl<7.21.5')
         PYTHON3_BACKPORTS=(docker-py six requests websocket-client)
         ;;
     ubuntu1204)
@@ -121,9 +117,9 @@ case "$TARGET" in
         PYTHON3_PKG_PREFIX=python3
         PYTHON_BACKPORTS=(python-gflags pyvcf google-api-python-client \
             oauth2client pyasn1==0.1.7 pyasn1-modules==0.0.5 \
-            rsa uritemplate httplib2 ws4py \
-            virtualenv pykka requests six pyexecjs jsonschema \
-            ciso8601 pycrypto backports.ssl_match_hostname pycurl llfuse)
+            rsa uritemplate httplib2 ws4py pykka six pyexecjs jsonschema \
+            ciso8601 pycrypto backports.ssl_match_hostname llfuse==0.41.1 \
+            'pycurl<7.21.5')
         PYTHON3_BACKPORTS=(docker-py six requests websocket-client)
         ;;
     ubuntu1404)
@@ -132,9 +128,9 @@ case "$TARGET" in
         PYTHON2_PKG_PREFIX=python
         PYTHON3_PACKAGE=python$PYTHON3_VERSION
         PYTHON3_PKG_PREFIX=python3
-        PYTHON_BACKPORTS=(pyasn1==0.1.7 pyvcf pyasn1-modules==0.0.5 llfuse ciso8601 \
+        PYTHON_BACKPORTS=(pyasn1==0.1.7 pyvcf pyasn1-modules==0.0.5 llfuse==0.41.1 ciso8601 \
             google-api-python-client six uritemplate oauth2client httplib2 \
-            rsa pycurl backports.ssl_match_hostname)
+            rsa 'pycurl<7.21.5' backports.ssl_match_hostname)
         PYTHON3_BACKPORTS=(docker-py requests websocket-client)
         ;;
     centos6)
@@ -145,11 +141,10 @@ case "$TARGET" in
         PYTHON3_PKG_PREFIX=$PYTHON3_PACKAGE
         PYTHON_BACKPORTS=(python-gflags pyvcf google-api-python-client \
             oauth2client pyasn1==0.1.7 pyasn1-modules==0.0.5 \
-            rsa uritemplate httplib2 ws4py \
-            pykka requests six pyexecjs jsonschema \
-            ciso8601 pycrypto backports.ssl_match_hostname pycurl
-            python-daemon lockfile llfuse)
-        PYTHON3_BACKPORTS=(docker-py six requests)
+            rsa uritemplate httplib2 ws4py pykka six pyexecjs jsonschema \
+            ciso8601 pycrypto backports.ssl_match_hostname 'pycurl<7.21.5' \
+            python-daemon lockfile llfuse==0.41.1 'pbr<1.0')
+        PYTHON3_BACKPORTS=(docker-py six requests websocket-client)
         export PYCURL_SSL_LIBRARY=nss
         ;;
     *)
@@ -231,8 +226,9 @@ rm -rf install
 perl Makefile.PL INSTALL_BASE=install >"$STDOUT_IF_DEBUG" && \
     make install INSTALLDIRS=perl >"$STDOUT_IF_DEBUG" && \
     fpm_build install/lib/=/usr/share libarvados-perl \
-    "Curoverse, Inc." dir "$(version_from_git)" install/man/=/usr/share/man && \
-    mv libarvados-perl*.$FORMAT "$WORKSPACE/packages/$TARGET/"
+    "Curoverse, Inc." dir "$(version_from_git)" install/man/=/usr/share/man \
+    "$WORKSPACE/LICENSE-2.0.txt=/usr/share/doc/libarvados-perl/LICENSE-2.0.txt" && \
+    mv --no-clobber libarvados-perl*.$FORMAT "$WORKSPACE/packages/$TARGET/"
 
 # Ruby gems
 debug_echo -e "\nRuby gems\n"
@@ -257,6 +253,9 @@ handle_python_package
 cd "$WORKSPACE/sdk/python"
 handle_python_package
 
+cd "$WORKSPACE/sdk/cwl"
+handle_python_package
+
 cd "$WORKSPACE/services/fuse"
 handle_python_package
 
@@ -271,6 +270,8 @@ handle_python_package
     COMMIT_HASH=$(format_last_commit_here "%H")
 
     SRC_BUILD_DIR=$(mktemp -d)
+    # mktemp creates the directory with 0700 permissions by default
+    chmod 755 $SRC_BUILD_DIR
     git clone $DASHQ_UNLESS_DEBUG "$WORKSPACE/.git" "$SRC_BUILD_DIR"
     cd "$SRC_BUILD_DIR"
 
@@ -283,77 +284,25 @@ handle_python_package
     cd $WORKSPACE/packages/$TARGET
     fpm_build $SRC_BUILD_DIR/=/usr/local/arvados/src arvados-src 'Curoverse, Inc.' 'dir' "$PKG_VERSION" "--exclude=usr/local/arvados/src/.git" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=The Arvados source code" "--architecture=all"
 
-    rm -r "$SRC_BUILD_DIR"
+    rm -rf "$SRC_BUILD_DIR"
 )
 
-# Keep
+# Go binaries
 export GOPATH=$(mktemp -d)
-mkdir -p "$GOPATH/src/git.curoverse.com"
-ln -sfn "$WORKSPACE" "$GOPATH/src/git.curoverse.com/arvados.git"
-
-# keepstore
-cd "$GOPATH/src/git.curoverse.com/arvados.git/services/keepstore"
-PKG_VERSION=$(version_from_git)
-go get "git.curoverse.com/arvados.git/services/keepstore"
-cd $WORKSPACE/packages/$TARGET
-fpm_build $GOPATH/bin/keepstore=/usr/bin/keepstore keepstore 'Curoverse, Inc.' 'dir' "$PKG_VERSION" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=Keepstore is the Keep storage daemon, accessible to clients on the LAN"
-
-# Get GO SDK version
-cd "$GOPATH/src/git.curoverse.com/arvados.git/sdk/go"
-GO_SDK_VERSION=$(version_from_git)
-GO_SDK_TIMESTAMP=$(timestamp_from_git)
-
-# keepproxy
-cd "$GOPATH/src/git.curoverse.com/arvados.git/services/keepproxy"
-KEEPPROXY_VERSION=$(version_from_git)
-KEEPPROXY_TIMESTAMP=$(timestamp_from_git)
-
-if [[ "$GO_SDK_TIMESTAMP" -gt "$KEEPPROXY_TIMESTAMP" ]]; then
-  PKG_VERSION=$GO_SDK_VERSION
-else
-  PKG_VERSION=$KEEPPROXY_VERSION
-fi
-
-go get "git.curoverse.com/arvados.git/services/keepproxy"
-cd $WORKSPACE/packages/$TARGET
-fpm_build $GOPATH/bin/keepproxy=/usr/bin/keepproxy keepproxy 'Curoverse, Inc.' 'dir' "$PKG_VERSION" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=Keepproxy makes a Keep cluster accessible to clients that are not on the LAN"
-
-# datamanager
-cd "$GOPATH/src/git.curoverse.com/arvados.git/services/datamanager"
-DATAMANAGER_VERSION=$(version_from_git)
-DATAMANAGER_TIMESTAMP=$(timestamp_from_git)
-
-if [[ "$GO_SDK_TIMESTAMP" -gt "$DATAMANAGER_TIMESTAMP" ]]; then
-  PKG_VERSION=$GO_SDK_VERSION
-else
-  PKG_VERSION=$DATAMANAGER_VERSION
-fi
-
-go get "git.curoverse.com/arvados.git/services/datamanager"
-cd $WORKSPACE/packages/$TARGET
-fpm_build $GOPATH/bin/datamanager=/usr/bin/arvados-data-manager arvados-data-manager 'Curoverse, Inc.' 'dir' "$PKG_VERSION" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=Datamanager ensures block replication levels, reports on disk usage and determines which blocks should be deleted when space is needed."
-
-# arv-git-httpd
-cd "$GOPATH/src/git.curoverse.com/arvados.git/services/arv-git-httpd"
-ARVGITHTTPD_VERSION=$(version_from_git)
-ARVGITHTTPD_TIMESTAMP=$(timestamp_from_git)
-
-if [[ "$GO_SDK_TIMESTAMP" -gt "$ARVGITHTTPD_TIMESTAMP" ]]; then
-  PKG_VERSION=$GO_SDK_VERSION
-else
-  PKG_VERSION=$ARVGITHTTPD_VERSION
-fi
-
-go get "git.curoverse.com/arvados.git/services/arv-git-httpd"
-cd $WORKSPACE/packages/$TARGET
-fpm_build $GOPATH/bin/arv-git-httpd=/usr/bin/arvados-git-httpd arvados-git-httpd 'Curoverse, Inc.' 'dir' "$PKG_VERSION" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=Provides authenticated http access to Arvados-hosted git repositories."
-
-# crunchstat
-cd "$GOPATH/src/git.curoverse.com/arvados.git/services/crunchstat"
-PKG_VERSION=$(version_from_git)
-go get "git.curoverse.com/arvados.git/services/crunchstat"
-cd $WORKSPACE/packages/$TARGET
-fpm_build $GOPATH/bin/crunchstat=/usr/bin/crunchstat crunchstat 'Curoverse, Inc.' 'dir' "$PKG_VERSION" "--url=https://arvados.org" "--license=GNU Affero General Public License, version 3.0" "--description=Crunchstat gathers cpu/memory/network statistics of running Crunch jobs"
+package_go_binary services/keepstore keepstore \
+    "Keep storage daemon, accessible to clients on the LAN"
+package_go_binary services/keepproxy keepproxy \
+    "Make a Keep cluster accessible to clients that are not on the LAN"
+package_go_binary services/keep-web keep-web \
+    "Static web hosting service for user data stored in Arvados Keep"
+package_go_binary services/datamanager arvados-data-manager \
+    "Ensure block replication levels, report disk usage, and determine which blocks should be deleted when space is needed"
+package_go_binary services/arv-git-httpd arvados-git-httpd \
+    "Provide authenticated http access to Arvados-hosted git repositories"
+package_go_binary services/crunchstat crunchstat \
+    "Gather cpu/memory/network statistics of running Crunch jobs"
+package_go_binary tools/keep-rsync keep-rsync \
+    "Copy all data from one set of Keep servers to another"
 
 # The Python SDK
 # Please resist the temptation to add --no-python-fix-name to the fpm call here
@@ -396,15 +345,59 @@ LIBCLOUD_DIR=$(mktemp -d)
     cd $LIBCLOUD_DIR
     git clone $DASHQ_UNLESS_DEBUG https://github.com/curoverse/libcloud.git .
     git checkout apache-libcloud-$LIBCLOUD_PIN
+    # libcloud is absurdly noisy without -q, so force -q here
+    OLD_DASHQ_UNLESS_DEBUG=$DASHQ_UNLESS_DEBUG
+    DASHQ_UNLESS_DEBUG=-q
     handle_python_package
+    DASHQ_UNLESS_DEBUG=$OLD_DASHQ_UNLESS_DEBUG
 )
 fpm_build $LIBCLOUD_DIR "$PYTHON2_PKG_PREFIX"-apache-libcloud
 rm -rf $LIBCLOUD_DIR
 
-# A few dependencies
+# Python 2 dependencies
+declare -a PIP_DOWNLOAD_SWITCHES=(--no-deps)
+# Add --no-use-wheel if this pip knows it.
+pip wheel --help >/dev/null 2>&1
+case "$?" in
+    0) PIP_DOWNLOAD_SWITCHES+=(--no-use-wheel) ;;
+    2) ;;
+    *) echo "WARNING: `pip wheel` test returned unknown exit code $?" ;;
+esac
+
 for deppkg in "${PYTHON_BACKPORTS[@]}"; do
     outname=$(echo "$deppkg" | sed -e 's/^python-//' -e 's/[<=>].*//' -e 's/_/-/g' -e "s/^/${PYTHON2_PKG_PREFIX}-/")
-    fpm_build "$deppkg" "$outname"
+    case "$deppkg" in
+        httplib2|google-api-python-client)
+            # Work around 0640 permissions on some package files.
+            # See #7591 and #7991.
+            pyfpm_workdir=$(mktemp --tmpdir -d pyfpm-XXXXXX) && (
+                set -e
+                cd "$pyfpm_workdir"
+                pip install "${PIP_DOWNLOAD_SWITCHES[@]}" --download . "$deppkg"
+                tar -xf "$deppkg"-*.tar*
+                cd "$deppkg"-*/
+                "python$PYTHON2_VERSION" setup.py $DASHQ_UNLESS_DEBUG egg_info build
+                chmod -R go+rX .
+                set +e
+                # --iteration 2 provides an upgrade for previously built
+                # buggy packages.
+                fpm_build . "$outname" "" python "" --iteration 2
+                # The upload step uses the package timestamp to determine
+                # whether it's new.  --no-clobber plays nice with that.
+                mv --no-clobber "$outname"*.$FORMAT "$WORKSPACE/packages/$TARGET"
+            )
+            if [ 0 != "$?" ]; then
+                echo "ERROR: $deppkg build process failed"
+                EXITCODE=1
+            fi
+            if [ -n "$pyfpm_workdir" ]; then
+                rm -rf "$pyfpm_workdir"
+            fi
+            ;;
+        *)
+            fpm_build "$deppkg" "$outname"
+            ;;
+    esac
 done
 
 # Python 3 dependencies
@@ -415,114 +408,47 @@ for deppkg in "${PYTHON3_BACKPORTS[@]}"; do
 done
 
 # Build the API server package
-
-cd "$WORKSPACE/services/api"
-
-API_VERSION=$(version_from_git)
-PACKAGE_NAME=arvados-api-server
-
-if [[ ! -d "$WORKSPACE/services/api/tmp" ]]; then
-  mkdir $WORKSPACE/services/api/tmp
-fi
-
-
-if [[ "$BUILD_BUNDLE_PACKAGES" != 0 ]]; then
-  bundle install --path vendor/bundle >"$STDOUT_IF_DEBUG"
-fi
-
-/usr/bin/git rev-parse HEAD > git-commit.version
-
-cd $WORKSPACE/packages/$TARGET
-
-# Annoyingly, we require a database.yml file for rake assets:precompile to work. So for now,
-# we do that in the upgrade script.
-# TODO: add bogus database.yml file so we can precompile the assets and put them in the
-# package. Then remove that database.yml file again. It has to be a valid file though.
-#RAILS_ENV=production RAILS_GROUPS=assets bundle exec rake assets:precompile
-
-# This is the complete package with vendor/bundle included.
-# It's big, so we do not build it by default.
-if [[ "$BUILD_BUNDLE_PACKAGES" != 0 ]]; then
-  declare -a COMMAND_ARR=("fpm" "--maintainer=Ward Vandewege <ward@curoverse.com>" "--vendor='Curoverse, Inc.'" "--url='https://arvados.org'" "--description='Arvados API server - Arvados is a free and open source platform for big data science.'" "--license='GNU Affero General Public License, version 3.0'" "-s" "dir" "-t" "$FORMAT" "-n" "${PACKAGE_NAME}-with-bundle" "-v" "$API_VERSION" "-x" "var/www/arvados-api/current/tmp" "-x" "var/www/arvados-api/current/log" "-x" "var/www/arvados-api/current/vendor/cache/*" "-x" "var/www/arvados-api/current/coverage" "-x" "var/www/arvados-api/current/Capfile*" "-x" "var/www/arvados-api/current/config/deploy*" "--after-install=$RUN_BUILD_PACKAGES_PATH/arvados-api-server-extras/postinst.sh" "$WORKSPACE/services/api/=/var/www/arvados-api/current" "$RUN_BUILD_PACKAGES_PATH/arvados-api-server-extras/arvados-api-server-upgrade.sh=/usr/local/bin/arvados-api-server-upgrade.sh")
-
-  debug_echo -e "\n${COMMAND_ARR[@]}\n"
-
-  FPM_RESULTS=$("${COMMAND_ARR[@]}")
-  FPM_EXIT_CODE=$?
-  fpm_verify $FPM_EXIT_CODE $FPM_RESULTS
-fi
-
-# Build the 'bare' package without vendor/bundle.
-declare -a COMMAND_ARR=("fpm" "--maintainer=Ward Vandewege <ward@curoverse.com>" "--vendor='Curoverse, Inc.'" "--url='https://arvados.org'" "--description='Arvados API server - Arvados is a free and open source platform for big data science.'" "--license='GNU Affero General Public License, version 3.0'" "-s" "dir" "-t" "$FORMAT" "-n" "${PACKAGE_NAME}" "-v" "$API_VERSION" "-x" "var/www/arvados-api/current/tmp" "-x" "var/www/arvados-api/current/log" "-x" "var/www/arvados-api/current/vendor/bundle" "-x" "var/www/arvados-api/current/vendor/cache/*" "-x" "var/www/arvados-api/current/coverage" "-x" "var/www/arvados-api/current/Capfile*" "-x" "var/www/arvados-api/current/config/deploy*" "--after-install=$RUN_BUILD_PACKAGES_PATH/arvados-api-server-extras/postinst.sh" "$WORKSPACE/services/api/=/var/www/arvados-api/current" "$RUN_BUILD_PACKAGES_PATH/arvados-api-server-extras/arvados-api-server-upgrade.sh=/usr/local/bin/arvados-api-server-upgrade.sh")
-
-debug_echo -e "\n${COMMAND_ARR[@]}\n"
-
-FPM_RESULTS=$("${COMMAND_ARR[@]}")
-FPM_EXIT_CODE=$?
-fpm_verify $FPM_EXIT_CODE $FPM_RESULTS
-
-# API server package build done
+handle_rails_package arvados-api-server "$WORKSPACE/services/api" \
+    "$WORKSPACE/agpl-3.0.txt" --url="https://arvados.org" \
+    --description="Arvados API server - Arvados is a free and open source platform for big data science." \
+    --license="GNU Affero General Public License, version 3.0"
 
 # Build the workbench server package
+(
+    set -e
+    cd "$WORKSPACE/apps/workbench"
 
-cd "$WORKSPACE/apps/workbench"
+    # We need to bundle to be ready even when we build a package without vendor directory
+    # because asset compilation requires it.
+    bundle install --path vendor/bundle >"$STDOUT_IF_DEBUG"
 
-WORKBENCH_VERSION=$(version_from_git)
-PACKAGE_NAME=arvados-workbench
+    # clear the tmp directory; the asset generation step will recreate tmp/cache/assets,
+    # and we want that in the package, so it's easier to not exclude the tmp directory
+    # from the package - empty it instead.
+    rm -rf tmp
+    mkdir tmp
 
-if [[ ! -d "$WORKSPACE/apps/workbench/tmp" ]]; then
-  mkdir $WORKSPACE/apps/workbench/tmp
-fi
+    # Set up application.yml and production.rb so that asset precompilation works
+    \cp config/application.yml.example config/application.yml -f
+    \cp config/environments/production.rb.example config/environments/production.rb -f
+    sed -i 's/secret_token: ~/secret_token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/' config/application.yml
 
-# We need to bundle to be ready even when we build a package without vendor directory
-# because asset compilation requires it.
-bundle install --path vendor/bundle >"$STDOUT_IF_DEBUG"
+    RAILS_ENV=production RAILS_GROUPS=assets bundle exec rake assets:precompile >/dev/null
 
-/usr/bin/git rev-parse HEAD > git-commit.version
-
-# clear the tmp directory; the asset generation step will recreate tmp/cache/assets,
-# and we want that in the package, so it's easier to not exclude the tmp directory
-# from the package - empty it instead.
-rm -rf $WORKSPACE/apps/workbench/tmp/*
-
-# Set up application.yml and production.rb so that asset precompilation works
-\cp config/application.yml.example config/application.yml -f
-\cp config/environments/production.rb.example config/environments/production.rb -f
-sed -i 's/secret_token: ~/secret_token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/' config/application.yml
-
-RAILS_ENV=production RAILS_GROUPS=assets bundle exec rake assets:precompile >/dev/null
+    # Remove generated configuration files so they don't go in the package.
+    rm config/application.yml config/environments/production.rb
+)
 
 if [[ "$?" != "0" ]]; then
   echo "ERROR: Asset precompilation failed"
   EXITCODE=1
+else
+  handle_rails_package arvados-workbench "$WORKSPACE/apps/workbench" \
+      "$WORKSPACE/agpl-3.0.txt" --url="https://arvados.org" \
+      --description="Arvados Workbench - Arvados is a free and open source platform for big data science." \
+      --license="GNU Affero General Public License, version 3.0"
 fi
 
-cd $WORKSPACE/packages/$TARGET
-
-# This is the complete package with vendor/bundle included.
-# It's big, so we do not build it by default.
-if [[ "$BUILD_BUNDLE_PACKAGES" != 0 ]]; then
-
-  declare -a COMMAND_ARR=("fpm" "--maintainer=Ward Vandewege <ward@curoverse.com>" "--vendor='Curoverse, Inc.'" "--url='https://arvados.org'" "--description='Arvados Workbench - Arvados is a free and open source platform for big data science.'" "--license='GNU Affero General Public License, version 3.0'" "-s" "dir" "-t" "$FORMAT" "-n" "${PACKAGE_NAME}-with-bundle" "-v" "$WORKBENCH_VERSION" "-x" "var/www/arvados-workbench/current/log" "-x" "var/www/arvados-workbench/current/vendor/cache/*" "-x" "var/www/arvados-workbench/current/coverage" "-x" "var/www/arvados-workbench/current/Capfile*" "-x" "var/www/arvados-workbench/current/config/deploy*" "--after-install=$RUN_BUILD_PACKAGES_PATH/arvados-workbench-extras/postinst.sh" "$WORKSPACE/apps/workbench/=/var/www/arvados-workbench/current" "$RUN_BUILD_PACKAGES_PATH/arvados-workbench-extras/arvados-workbench-upgrade.sh=/usr/local/bin/arvados-workbench-upgrade.sh")
-
-  debug_echo -e "\n${COMMAND_ARR[@]}\n"
-
-  FPM_RESULTS=$("${COMMAND_ARR[@]}")
-  FPM_EXIT_CODE=$?
-  fpm_verify $FPM_EXIT_CODE $FPM_RESULTS
-fi
-
-# Build the 'bare' package without vendor/bundle.
-
-declare -a COMMAND_ARR=("fpm" "--maintainer=Ward Vandewege <ward@curoverse.com>" "--vendor='Curoverse, Inc.'" "--url='https://arvados.org'" "--description='Arvados Workbench - Arvados is a free and open source platform for big data science.'" "--license='GNU Affero General Public License, version 3.0'" "-s" "dir" "-t" "$FORMAT" "-n" "${PACKAGE_NAME}" "-v" "$WORKBENCH_VERSION" "-x" "var/www/arvados-workbench/current/log" "-x" "var/www/arvados-workbench/current/vendor/bundle" "-x" "var/www/arvados-workbench/current/vendor/cache/*" "-x" "var/www/arvados-workbench/current/coverage" "-x" "var/www/arvados-workbench/current/Capfile*" "-x" "var/www/arvados-workbench/current/config/deploy*" "--after-install=$RUN_BUILD_PACKAGES_PATH/arvados-workbench-extras/postinst.sh" "$WORKSPACE/apps/workbench/=/var/www/arvados-workbench/current" "$RUN_BUILD_PACKAGES_PATH/arvados-workbench-extras/arvados-workbench-upgrade.sh=/usr/local/bin/arvados-workbench-upgrade.sh")
-
-debug_echo -e "\n${COMMAND_ARR[@]}\n"
-
-FPM_RESULTS=$("${COMMAND_ARR[@]}")
-FPM_EXIT_CODE=$?
-fpm_verify $FPM_EXIT_CODE $FPM_RESULTS
-
-# Workbench package build done
 # clean up temporary GOPATH
 rm -rf "$GOPATH"
 

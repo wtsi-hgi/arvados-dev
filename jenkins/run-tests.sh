@@ -59,21 +59,28 @@ apps/workbench_benchmark
 apps/workbench_profile
 doc
 services/api
+services/arv-git-httpd
 services/crunchstat
 services/dockercleaner
 services/fuse
+services/keep-web
 services/keepproxy
 services/keepstore
 services/login-sync
 services/nodemanager
-services/arv-git-httpd
+services/crunch-dispatch-local
 sdk/cli
 sdk/pam
 sdk/python
 sdk/ruby
 sdk/go/arvadosclient
 sdk/go/keepclient
+sdk/go/manifest
+sdk/go/blockdigest
 sdk/go/streamer
+sdk/go/crunchrunner
+tools/crunchstat-summary
+tools/keep-rsync
 
 EOF
 
@@ -149,7 +156,7 @@ sanity_checks() {
     echo Checking dependencies:
     echo -n 'virtualenv: '
     virtualenv --version \
-        || fatal "No virtualenv. Try: apt-get install virtualenv"
+        || fatal "No virtualenv. Try: apt-get install virtualenv (on ubuntu: python-virtualenv)"
     echo -n 'go: '
     go version \
         || fatal "No go binary. See http://golang.org/doc/install"
@@ -171,7 +178,7 @@ sanity_checks() {
     for mod in ExtUtils::MakeMaker JSON LWP Net::SSL; do
         echo -n "perl $mod: "
         perl -e "use $mod; print \"\$$mod::VERSION\\n\"" \
-            || fatal "No $mod. Try: apt-get install perl-modules libcrypt-ssleay-perl libjson-perl"
+            || fatal "No $mod. Try: apt-get install perl-modules libcrypt-ssleay-perl libjson-perl libwww-perl"
     done
     echo -n 'gitolite: '
     which gitolite \
@@ -251,9 +258,10 @@ start_api() {
 }
 
 start_nginx_proxy_services() {
-    echo 'Starting keepproxy, arv-git-httpd, and nginx ssl proxy...'
+    echo 'Starting keepproxy, keep-web, arv-git-httpd, and nginx ssl proxy...'
     cd "$WORKSPACE" \
         && python sdk/python/tests/run_test_server.py start_keep_proxy \
+        && python sdk/python/tests/run_test_server.py start_keep-web \
         && python sdk/python/tests/run_test_server.py start_arv-git-httpd \
         && python sdk/python/tests/run_test_server.py start_nginx \
         && export ARVADOS_TEST_PROXY_SERVICES=1
@@ -265,6 +273,7 @@ stop_services() {
         cd "$WORKSPACE" \
             && python sdk/python/tests/run_test_server.py stop_nginx \
             && python sdk/python/tests/run_test_server.py stop_arv-git-httpd \
+            && python sdk/python/tests/run_test_server.py stop_keep-web \
             && python sdk/python/tests/run_test_server.py stop_keep_proxy
     fi
     if [[ -n "$ARVADOS_TEST_API_HOST" ]]; then
@@ -384,6 +393,16 @@ gem_uninstall_if_exists() {
     fi
 }
 
+setup_virtualenv() {
+    local venvdest="$1"; shift
+    if ! [[ -e "$venvdest/bin/activate" ]] || ! [[ -e "$venvdest/bin/pip" ]]; then
+        virtualenv --setuptools "$@" "$venvdest" || fatal "virtualenv $venvdest failed"
+    fi
+    "$venvdest/bin/pip" install 'setuptools>=18' 'pip>=7'
+    # ubuntu1404 can't seem to install mock via tests_require, but it can do this.
+    "$venvdest/bin/pip" install 'mock>=1.0' 'pbr<1.7.0'
+}
+
 export PERLINSTALLBASE
 export PERLLIB="$PERLINSTALLBASE/lib/perl5:${PERLLIB:+$PERLLIB}"
 
@@ -392,14 +411,8 @@ mkdir -p "$GOPATH/src/git.curoverse.com"
 ln -sfn "$WORKSPACE" "$GOPATH/src/git.curoverse.com/arvados.git" \
     || fatal "symlink failed"
 
-if ! [[ -e "$VENVDIR/bin/activate" ]] || ! [[ -e "$VENVDIR/bin/pip" ]]; then
-    virtualenv --setuptools "$VENVDIR" || fatal "virtualenv $VENVDIR failed"
-fi
+setup_virtualenv "$VENVDIR" --python python2.7
 . "$VENVDIR/bin/activate"
-
-if (pip install setuptools | grep setuptools-0) || [ "$($VENVDIR/bin/easy_install --version | cut -d\  -f2 | cut -d. -f1)" -lt 18 ]; then
-    pip install --upgrade setuptools pip
-fi
 
 # Needed for run_test_server.py which is used by certain (non-Python) tests.
 pip freeze 2>/dev/null | egrep ^PyYAML= \
@@ -419,17 +432,7 @@ deactivate
 # Otherwise, skip dependent tests.
 PYTHON3=$(which python3)
 if [ "0" = "$?" ]; then
-    virtualenv --python "$PYTHON3" --setuptools "$VENV3DIR" \
-	|| fatal "python3 virtualenv $VENV3DIR failed"
-
-    . "$VENV3DIR/bin/activate"
-
-    if (pip install setuptools | grep setuptools-0) || [ "$($VENV3DIR/bin/easy_install --version | cut -d\  -f2 | cut -d. -f1)" -lt 18 ]; then
-	pip install --upgrade setuptools pip
-    fi
-
-    # Deactivate Python 3 virtualenv
-    deactivate
+    setup_virtualenv "$VENV3DIR" --python python3
 else
     PYTHON3=
     skip[services/dockercleaner]=1
@@ -523,15 +526,22 @@ do_test_once() {
         then
             covername="coverage-$(echo "$1" | sed -e 's/\//_/g')"
             coverflags=("-covermode=count" "-coverprofile=$WORKSPACE/tmp/.$covername.tmp")
+            # We do "go get -t" here to catch compilation errors
+            # before trying "go test". Otherwise, coverage-reporting
+            # mode makes Go show the wrong line numbers when reporting
+            # compilation errors.
             if [[ -n "${testargs[$1]}" ]]
             then
                 # "go test -check.vv giturl" doesn't work, but this
                 # does:
-                cd "$WORKSPACE/$1" && go test ${coverflags[@]} ${testargs[$1]}
+                cd "$WORKSPACE/$1" && \
+                    go get -t "git.curoverse.com/arvados.git/$1" && \
+                    go test ${coverflags[@]} ${testargs[$1]}
             else
                 # The above form gets verbose even when testargs is
                 # empty, so use this form in such cases:
-                go test ${coverflags[@]} "git.curoverse.com/arvados.git/$1"
+                go get -t "git.curoverse.com/arvados.git/$1" && \
+                    go test ${coverflags[@]} "git.curoverse.com/arvados.git/$1"
             fi
             result="$?"
             go tool cover -html="$WORKSPACE/tmp/.$covername.tmp" -o "$WORKSPACE/tmp/$covername.html"
@@ -664,6 +674,7 @@ pythonstuff=(
     sdk/python
     services/fuse
     services/nodemanager
+    tools/crunchstat-summary
     )
 for p in "${pythonstuff[@]}"
 do
@@ -725,15 +736,24 @@ do_install services/api apiserver
 
 declare -a gostuff
 gostuff=(
+    sdk/go/arvadosclient
+    sdk/go/blockdigest
+    sdk/go/manifest
+    sdk/go/streamer
+    sdk/go/crunchrunner
     services/arv-git-httpd
     services/crunchstat
+    services/keep-web
     services/keepstore
+    sdk/go/keepclient
     services/keepproxy
     services/datamanager/summary
     services/datamanager/collection
-    sdk/go/arvadosclient
-    sdk/go/keepclient
-    sdk/go/streamer
+    services/datamanager/keep
+    services/datamanager
+    services/crunch-dispatch-local
+    services/crunch-run
+    tools/keep-rsync
     )
 for g in "${gostuff[@]}"
 do
