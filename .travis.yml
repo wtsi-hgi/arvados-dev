@@ -1,0 +1,13 @@
+sudo: required
+
+services:
+  - docker
+
+git:
+  submodules: false
+
+before_install:
+- docker pull ubuntu:12.04
+- git submodule update --init --recursive
+- docker run -v $(pwd)/jenkins:/jenkins -v $(pwd)/arvados:/arvados ubuntu:14.04 /bin/sh -c 'WORKSPACE=/arvados /jenkins/run-build-packages-one-target.sh --target=ubuntu1204'
+
