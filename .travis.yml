@@ -8,6 +8,5 @@ git:
 
 before_install:
 - git submodule update --init --recursive
-- docker pull ubuntu:12.04
-- docker run -v $(pwd)/jenkins:/jenkins -v $(pwd)/arvados:/arvados ubuntu:12.04 /bin/sh -c 'WORKSPACE=/arvados /jenkins/run-build-packages-one-target.sh --target=ubuntu1204'
+- /bin/sh -c "WORKSPACE=$(pwd)/arvados ./jenkins/run-build-packages-all-targets.sh --target=ubuntu1204"
 
