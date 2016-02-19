@@ -8,5 +8,5 @@ git:
 
 before_install:
 - git submodule update --init --recursive
-- /bin/sh -c "WORKSPACE=$(pwd)/arvados ./jenkins/run-build-packages-all-targets.sh --target=ubuntu1204"
+- /bin/sh -c "WORKSPACE=$(pwd)/arvados ./jenkins/run-build-packages-all-targets.sh"
 
